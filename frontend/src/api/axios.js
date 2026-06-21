@@ -1,40 +1,31 @@
-import axios from 'axios';
+import axios from "axios";
+
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL || "http://localhost:5001/api";
+
+console.log("API Base URL:", API_BASE_URL);
 
 const API = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE_URL,
   headers: {
-    'Content-Type': 'application/json'
-  }
+    "Content-Type": "application/json",
+  },
 });
 
-// Request interceptor to add authorization token
 API.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('cafeflow_token');
+    const token =
+      localStorage.getItem("token") ||
+      localStorage.getItem("cafeflow_token") ||
+      localStorage.getItem("authToken");
+
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
-);
-
-// Response interceptor to handle session expiration or global errors
-API.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response && error.response.status === 401) {
-      // Clear storage and trigger redirect to login if unauthorized
-      localStorage.removeItem('cafeflow_token');
-      localStorage.removeItem('cafeflow_user');
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login';
-      }
-    }
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
 export default API;
