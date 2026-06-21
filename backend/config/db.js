@@ -5,15 +5,12 @@ const connectDB = async () => {
     const mongoURI = process.env.MONGO_URI || process.env.MONGODB_URI;
 
     if (!mongoURI) {
-      throw new Error("MONGO_URI or MONGODB_URI is missing in backend/.env");
+      throw new Error("MONGO_URI or MONGODB_URI is missing");
     }
 
-    console.log(
-      "Using MongoDB URI:",
-      mongoURI.includes("mongodb+srv")
-        ? "MongoDB Atlas URI loaded"
-        : mongoURI
-    );
+    const safeURI = mongoURI.replace(/\/\/([^:]+):([^@]+)@/, "//****:****@");
+
+    console.log("Using MongoDB URI:", safeURI);
 
     const conn = await mongoose.connect(mongoURI);
 
