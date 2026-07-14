@@ -34,14 +34,6 @@
   <img src="https://img.shields.io/badge/▶️_Watch_Demo-YouTube-red?style=for-the-badge&logo=youtube" />
 </a>
 
-<br><br>
-
-**📺 Watch the complete CafeFlow demonstration**
-
-https://youtu.be/EZ1gTiDQsrg
-
-</p>
-
 ---
 
 # 🚨 Problem Statement
