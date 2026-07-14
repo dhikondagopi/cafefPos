@@ -26,16 +26,21 @@
 🚧 **Coming Soon**
 
 ---
-## 🎥 Demo Video
+# 🎥 Demo Video
 
 <p align="center">
 
-<a href="https://youtu.be/your-video-link">
-<img src="https://img.shields.io/badge/▶️_Watch_Demo-YouTube-red?style=for-the-badge&logo=youtube" />
+<a href="https://youtu.be/EZ1gTiDQsrg" target="_blank">
+  <img src="https://img.shields.io/badge/▶️_Watch_Demo-YouTube-red?style=for-the-badge&logo=youtube" />
 </a>
 
-</p>
+<br><br>
 
+**📺 Watch the complete CafeFlow demonstration**
+
+https://youtu.be/EZ1gTiDQsrg
+
+</p>
 
 ---
 
