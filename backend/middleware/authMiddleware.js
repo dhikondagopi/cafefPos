@@ -1,40 +1,116 @@
-const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
 
-const protect = async (req, res, next) => {
-  let token;
+const sendUnauthorized = (res, message = "Not authorized") => {
+  return res.status(401).json({
+    success: false,
+    message,
+  });
+};
 
-  if (
-    req.headers.authorization &&
-    req.headers.authorization.startsWith('Bearer')
-  ) {
-    try {
-      // Get token from header
-      token = req.headers.authorization.split(' ')[1];
+const sendForbidden = (res, message = "Access denied") => {
+  return res.status(403).json({
+    success: false,
+    message,
+  });
+};
 
-      // Verify token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'cafeflowsecretkey123');
+const getTokenFromRequest = (req) => {
+  const authHeader = req.headers.authorization || req.headers.Authorization;
 
-      // Get user from the token, exclude password
-      req.user = await User.findById(decoded.id).select('-password');
-      if (!req.user) {
-        return res.status(401).json({ success: false, message: 'Not authorized, user not found' });
-      }
-
-      if (!req.user.isActive) {
-        return res.status(401).json({ success: false, message: 'User account is deactivated' });
-      }
-
-      next();
-    } catch (error) {
-      console.error(error);
-      res.status(401).json({ success: false, message: 'Not authorized, token failed' });
-    }
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    return authHeader.split(" ")[1];
   }
 
-  if (!token) {
-    res.status(401).json({ success: false, message: 'Not authorized, no token provided' });
+  if (req.cookies?.token) {
+    return req.cookies.token;
+  }
+
+  return null;
+};
+
+// Protect route
+const protect = async (req, res, next) => {
+  try {
+    const token = getTokenFromRequest(req);
+
+    if (!token) {
+      return sendUnauthorized(res, "No token provided. Please login again.");
+    }
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({
+        success: false,
+        message: "JWT_SECRET is missing in environment variables",
+      });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    const userId = decoded.id || decoded._id || decoded.userId;
+
+    if (!userId) {
+      return sendUnauthorized(res, "Invalid token payload");
+    }
+
+    const user = await User.findById(userId).select("-password");
+
+    if (!user) {
+      return sendUnauthorized(res, "User not found. Please login again.");
+    }
+
+    if (user.isActive === false) {
+      return sendForbidden(res, "Your account is inactive");
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    console.error("Auth middleware error:", error.message);
+
+    if (error.name === "TokenExpiredError") {
+      return sendUnauthorized(res, "Token expired. Please login again.");
+    }
+
+    if (error.name === "JsonWebTokenError") {
+      return sendUnauthorized(res, "Invalid token. Please login again.");
+    }
+
+    return sendUnauthorized(res, "Authentication failed");
   }
 };
 
-module.exports = { protect };
+// Role authorization
+const authorize = (...roles) => {
+  const allowedRoles = roles.flat();
+
+  return (req, res, next) => {
+    if (!req.user) {
+      return sendUnauthorized(res, "User not authenticated");
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      return sendForbidden(
+        res,
+        `Role '${req.user.role}' is not allowed to access this route`
+      );
+    }
+
+    next();
+  };
+};
+
+// Useful aliases so old route files do not break
+const adminOnly = authorize("admin");
+const admin = authorize("admin");
+const authorizeRoles = authorize;
+const restrictTo = authorize;
+
+module.exports = {
+  protect,
+  authorize,
+  authorizeRoles,
+  restrictTo,
+  adminOnly,
+  admin,
+};

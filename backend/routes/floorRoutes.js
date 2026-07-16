@@ -1,24 +1,12 @@
 const express = require("express");
-const mongoose = require("mongoose");
-const Table = require("../models/Table");
 const Floor = require("../models/Floor");
-const Order = require("../models/Order");
-const { protect, authorize } = require("../middleware/authMiddleware");
+const Table = require("../models/Table");
+const { protect } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
 const READ_ROLES = ["admin", "employee", "cashier"];
 const ADMIN_ROLES = ["admin"];
-
-const TABLE_STATUSES = [
-  "available",
-  "occupied",
-  "payment_pending",
-  "reserved",
-  "inactive",
-];
-
-const TABLE_SHAPES = ["square", "round", "rectangle", "circle"];
 
 const sendSuccess = (res, message, data = {}, statusCode = 200) => {
   return res.status(statusCode).json({
@@ -35,459 +23,311 @@ const sendError = (res, statusCode, message) => {
   });
 };
 
-const getTableDisplayName = (table) => {
-  return (
-    table?.name ||
-    table?.tableName ||
-    table?.tableNumber ||
-    table?.number ||
-    "Table"
-  );
+// Local role checker.
+// This avoids "authorize is not a function" problems from mixed middleware files.
+const allowRoles = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return sendError(res, 401, "User not authenticated");
+    }
+
+    if (!roles.includes(req.user.role)) {
+      return sendError(
+        res,
+        403,
+        `Role '${req.user.role}' is not allowed to access this route`
+      );
+    }
+
+    next();
+  };
 };
 
-const normalizeStatus = (status = "available") => {
-  const normalized = String(status || "available").toLowerCase();
-
-  if (TABLE_STATUSES.includes(normalized)) {
-    return normalized;
+const normalizeBoolean = (value, defaultValue = true) => {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
   }
 
-  return "available";
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  return String(value).toLowerCase() === "true";
 };
 
-const normalizeShape = (shape = "square") => {
-  const normalized = String(shape || "square").toLowerCase();
-
-  if (normalized === "rect") return "rectangle";
-  if (normalized === "circular") return "round";
-
-  if (TABLE_SHAPES.includes(normalized)) {
-    return normalized;
-  }
-
-  return "square";
+const getFloorName = (floor) => {
+  return floor?.name || floor?.floorName || floor?.title || "Unnamed Floor";
 };
 
-const buildTablePayload = (body) => {
-  const payload = {};
+const buildFloorPayload = (body) => {
+  const name = String(body.name || body.floorName || body.title || "").trim();
 
-  if (body.name !== undefined) payload.name = String(body.name).trim();
-  if (body.tableName !== undefined && !payload.name) {
-    payload.name = String(body.tableName).trim();
-  }
-  if (body.tableNumber !== undefined && !payload.name) {
-    payload.name = String(body.tableNumber).trim();
-  }
-
-  if (body.capacity !== undefined || body.seats !== undefined) {
-    payload.capacity = Number(body.capacity ?? body.seats ?? 2);
-  }
-
-  if (body.floor !== undefined || body.floorId !== undefined) {
-    payload.floor = body.floor || body.floorId;
-  }
-
-  if (body.status !== undefined) {
-    payload.status = normalizeStatus(body.status);
-  }
-
-  if (body.shape !== undefined) {
-    payload.shape = normalizeShape(body.shape);
-  }
-
-  if (body.posX !== undefined || body.x !== undefined) {
-    payload.posX = Number(body.posX ?? body.x ?? 10);
-  }
-
-  if (body.posY !== undefined || body.y !== undefined) {
-    payload.posY = Number(body.posY ?? body.y ?? 10);
-  }
-
-  if (body.width !== undefined) {
-    payload.width = Number(body.width || 90);
-  }
-
-  if (body.height !== undefined) {
-    payload.height = Number(body.height || 90);
-  }
-
-  if (body.isActive !== undefined || body.active !== undefined) {
-    payload.isActive = body.isActive ?? body.active;
-  }
-
-  return payload;
+  return {
+    name,
+    color: String(body.color || "#6366f1").trim(),
+    isActive: normalizeBoolean(body.isActive ?? body.active, true),
+    description:
+      body.description !== undefined
+        ? String(body.description || "").trim()
+        : undefined,
+    sortOrder:
+      body.sortOrder !== undefined ? Number(body.sortOrder || 0) : undefined,
+  };
 };
 
-const emitTableUpdate = (req, table, eventName = "table_updated") => {
-  const io = req.app.get("io");
+const cleanPayload = (payload) => {
+  const cleaned = {};
 
-  if (io) {
-    io.emit(eventName, table);
-    io.emit("table_status_updated", {
-      tableId: table._id || table.id,
-      status: table.status,
-      table,
-    });
-  }
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value !== undefined) {
+      cleaned[key] = value;
+    }
+  });
+
+  return cleaned;
 };
 
-// @route   GET /api/tables
-// @desc    Get all tables for POS/admin
+// @route   GET /api/floors
+// @desc    Get all floors
 // @access  Admin, Employee, Cashier
-router.get("/", protect, authorize(...READ_ROLES), async (req, res) => {
+router.get("/", protect, allowRoles(...READ_ROLES), async (req, res) => {
   try {
-    const {
-      floor,
-      floorId,
-      status,
-      includeInactive = "false",
-      search = "",
-    } = req.query;
+    const includeInactive = req.query.includeInactive === "true";
 
-    const query = {};
+    const query = includeInactive ? {} : { isActive: { $ne: false } };
 
-    if (floor || floorId) {
-      query.floor = floor || floorId;
+    const floors = await Floor.find(query)
+      .sort({ sortOrder: 1, createdAt: 1, name: 1 })
+      .lean();
+
+    const floorIds = floors.map((floor) => floor._id);
+
+    const tables = await Table.find({ floor: { $in: floorIds } })
+      .select("name tableName tableNumber capacity seats status floor")
+      .lean();
+
+    const formattedFloors = floors.map((floor) => {
+      const floorTables = tables.filter(
+        (table) => String(table.floor) === String(floor._id)
+      );
+
+      return {
+        ...floor,
+        displayName: getFloorName(floor),
+        tableCount: floorTables.length,
+        availableTables: floorTables.filter(
+          (table) => table.status === "available"
+        ).length,
+        occupiedTables: floorTables.filter(
+          (table) => table.status === "occupied"
+        ).length,
+        paymentPendingTables: floorTables.filter(
+          (table) => table.status === "payment_pending"
+        ).length,
+        reservedTables: floorTables.filter(
+          (table) => table.status === "reserved"
+        ).length,
+      };
+    });
+
+    return sendSuccess(res, "Floors fetched successfully", {
+      count: formattedFloors.length,
+      floors: formattedFloors,
+      data: formattedFloors,
+    });
+  } catch (error) {
+    console.error("Get floors error:", error);
+    return sendError(res, 500, error.message || "Failed to fetch floors");
+  }
+});
+
+// @route   GET /api/floors/:id
+// @desc    Get one floor with its tables
+// @access  Admin, Employee, Cashier
+router.get("/:id", protect, allowRoles(...READ_ROLES), async (req, res) => {
+  try {
+    const floor = await Floor.findById(req.params.id).lean();
+
+    if (!floor) {
+      return sendError(res, 404, "Floor not found");
     }
 
-    if (status && status !== "all") {
-      query.status = normalizeStatus(status);
-    }
-
-    if (includeInactive !== "true") {
-      query.status = { ...(query.status ? { $eq: query.status } : {}), $ne: "inactive" };
-    }
-
-    if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { tableName: { $regex: search, $options: "i" } },
-        { tableNumber: { $regex: search, $options: "i" } },
-      ];
-    }
-
-    const tables = await Table.find(query)
-      .populate("floor", "name color isActive")
+    const tables = await Table.find({ floor: floor._id })
       .sort({ createdAt: 1, name: 1 })
       .lean();
 
-    const activeOrderTableIds = await Order.find({
-      status: { $in: ["draft", "sent_to_kitchen"] },
-    })
-      .select("table status kitchenStatus total orderNumber")
-      .lean();
-
-    const orderMap = new Map();
-
-    activeOrderTableIds.forEach((order) => {
-      if (order.table) {
-        orderMap.set(String(order.table), order);
-      }
-    });
-
-    const formattedTables = tables.map((table) => ({
-      ...table,
-      displayName: getTableDisplayName(table),
-      activeOrder: orderMap.get(String(table._id)) || null,
-    }));
-
-    return sendSuccess(res, "Tables fetched successfully", {
-      count: formattedTables.length,
-      tables: formattedTables,
-      data: formattedTables,
-    });
-  } catch (error) {
-    console.error("Get tables error:", error);
-    return sendError(res, 500, "Failed to fetch tables");
-  }
-});
-
-// @route   GET /api/tables/stats/summary
-// @desc    Get table status summary
-// @access  Admin, Employee, Cashier
-router.get(
-  "/stats/summary",
-  protect,
-  authorize(...READ_ROLES),
-  async (req, res) => {
-    try {
-      const tables = await Table.find({}).lean();
-
-      const summary = {
-        total: tables.length,
-        available: tables.filter((table) => table.status === "available").length,
-        occupied: tables.filter((table) => table.status === "occupied").length,
-        payment_pending: tables.filter(
-          (table) => table.status === "payment_pending"
-        ).length,
-        reserved: tables.filter((table) => table.status === "reserved").length,
-        inactive: tables.filter((table) => table.status === "inactive").length,
-      };
-
-      return sendSuccess(res, "Table summary fetched successfully", {
-        summary,
-        data: summary,
-      });
-    } catch (error) {
-      console.error("Table summary error:", error);
-      return sendError(res, 500, "Failed to fetch table summary");
-    }
-  }
-);
-
-// @route   GET /api/tables/:id
-// @desc    Get single table
-// @access  Admin, Employee, Cashier
-router.get("/:id", protect, authorize(...READ_ROLES), async (req, res) => {
-  try {
-    const table = await Table.findById(req.params.id)
-      .populate("floor", "name color isActive")
-      .lean();
-
-    if (!table) {
-      return sendError(res, 404, "Table not found");
-    }
-
-    const activeOrder = await Order.findOne({
-      table: table._id,
-      status: { $in: ["draft", "sent_to_kitchen"] },
-    })
-      .sort({ createdAt: -1 })
-      .lean();
-
-    const formattedTable = {
-      ...table,
-      displayName: getTableDisplayName(table),
-      activeOrder,
+    const formattedFloor = {
+      ...floor,
+      displayName: getFloorName(floor),
+      tables,
     };
 
-    return sendSuccess(res, "Table fetched successfully", {
-      table: formattedTable,
-      data: formattedTable,
+    return sendSuccess(res, "Floor fetched successfully", {
+      floor: formattedFloor,
+      data: formattedFloor,
     });
   } catch (error) {
-    console.error("Get table error:", error);
-    return sendError(res, 500, "Failed to fetch table");
+    console.error("Get floor error:", error);
+    return sendError(res, 500, error.message || "Failed to fetch floor");
   }
 });
 
-// @route   POST /api/tables
-// @desc    Create table
+// @route   POST /api/floors
+// @desc    Create floor
 // @access  Admin only
-router.post("/", protect, authorize(...ADMIN_ROLES), async (req, res) => {
+router.post("/", protect, allowRoles(...ADMIN_ROLES), async (req, res) => {
   try {
-    const payload = buildTablePayload(req.body);
+    const payload = cleanPayload(buildFloorPayload(req.body));
 
     if (!payload.name) {
-      return sendError(res, 400, "Table name is required");
+      return sendError(res, 400, "Floor name is required");
     }
 
-    if (!payload.capacity || payload.capacity < 1) {
-      return sendError(res, 400, "Valid seating capacity is required");
-    }
-
-    if (!payload.floor) {
-      return sendError(res, 400, "Floor is required");
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(payload.floor)) {
-      return sendError(res, 400, "Invalid floor id");
-    }
-
-    const floorExists = await Floor.findById(payload.floor);
-
-    if (!floorExists) {
-      return sendError(res, 404, "Selected floor does not exist");
-    }
-
-    const duplicateTable = await Table.findOne({
-      floor: payload.floor,
+    const existingFloor = await Floor.findOne({
       name: { $regex: new RegExp(`^${payload.name}$`, "i") },
     });
 
-    if (duplicateTable) {
-      return sendError(res, 400, "Table already exists on this floor");
+    if (existingFloor) {
+      return sendError(res, 400, "Floor name already exists");
     }
 
-    const table = await Table.create({
-      ...payload,
-      status: payload.status || "available",
-      posX: payload.posX ?? 10,
-      posY: payload.posY ?? 10,
-      width: payload.width ?? 90,
-      height: payload.height ?? 90,
-      shape: payload.shape || "square",
-    });
+    const floor = await Floor.create(payload);
 
-    const populatedTable = await Table.findById(table._id).populate(
-      "floor",
-      "name color isActive"
-    );
+    const io = req.app.get("io") || req.io;
 
-    emitTableUpdate(req, populatedTable, "table_created");
+    if (io) {
+      io.emit("floor_created", floor);
+      io.emit("floor_updated", floor);
+    }
 
     return sendSuccess(
       res,
-      "Table created successfully",
+      "Floor created successfully",
       {
-        table: populatedTable,
-        data: populatedTable,
+        floor,
+        data: floor,
       },
       201
     );
   } catch (error) {
-    console.error("Create table error:", error);
-    return sendError(res, 500, error.message || "Failed to create table");
+    console.error("Create floor error:", error);
+    return sendError(res, 500, error.message || "Failed to create floor");
   }
 });
 
-// @route   PUT /api/tables/:id
-// @desc    Update table
+// @route   PUT /api/floors/:id
+// @desc    Update floor
 // @access  Admin only
-router.put("/:id", protect, authorize(...ADMIN_ROLES), async (req, res) => {
+router.put("/:id", protect, allowRoles(...ADMIN_ROLES), async (req, res) => {
   try {
-    const payload = buildTablePayload(req.body);
+    const payload = cleanPayload(buildFloorPayload(req.body));
 
-    if (payload.floor && !mongoose.Types.ObjectId.isValid(payload.floor)) {
-      return sendError(res, 400, "Invalid floor id");
+    if (!payload.name) {
+      return sendError(res, 400, "Floor name is required");
     }
 
-    if (payload.floor) {
-      const floorExists = await Floor.findById(payload.floor);
+    const duplicateFloor = await Floor.findOne({
+      _id: { $ne: req.params.id },
+      name: { $regex: new RegExp(`^${payload.name}$`, "i") },
+    });
 
-      if (!floorExists) {
-        return sendError(res, 404, "Selected floor does not exist");
-      }
+    if (duplicateFloor) {
+      return sendError(res, 400, "Another floor with this name already exists");
     }
 
-    if (payload.name && payload.floor) {
-      const duplicateTable = await Table.findOne({
-        _id: { $ne: req.params.id },
-        floor: payload.floor,
-        name: { $regex: new RegExp(`^${payload.name}$`, "i") },
-      });
-
-      if (duplicateTable) {
-        return sendError(res, 400, "Another table with this name already exists on this floor");
-      }
-    }
-
-    const table = await Table.findByIdAndUpdate(req.params.id, payload, {
+    const floor = await Floor.findByIdAndUpdate(req.params.id, payload, {
       new: true,
       runValidators: true,
-    }).populate("floor", "name color isActive");
+    });
 
-    if (!table) {
-      return sendError(res, 404, "Table not found");
+    if (!floor) {
+      return sendError(res, 404, "Floor not found");
     }
 
-    emitTableUpdate(req, table, "table_updated");
+    const io = req.app.get("io") || req.io;
 
-    return sendSuccess(res, "Table updated successfully", {
-      table,
-      data: table,
+    if (io) {
+      io.emit("floor_updated", floor);
+    }
+
+    return sendSuccess(res, "Floor updated successfully", {
+      floor,
+      data: floor,
     });
   } catch (error) {
-    console.error("Update table error:", error);
-    return sendError(res, 500, error.message || "Failed to update table");
+    console.error("Update floor error:", error);
+    return sendError(res, 500, error.message || "Failed to update floor");
   }
 });
 
-// @route   PATCH /api/tables/:id
-// @desc    Update table partially
+// @route   PATCH /api/floors/:id
+// @desc    Partially update floor
 // @access  Admin only
-router.patch("/:id", protect, authorize(...ADMIN_ROLES), async (req, res) => {
+router.patch("/:id", protect, allowRoles(...ADMIN_ROLES), async (req, res) => {
   try {
-    const payload = buildTablePayload(req.body);
+    const payload = cleanPayload(buildFloorPayload(req.body));
 
-    const table = await Table.findByIdAndUpdate(req.params.id, payload, {
+    const floor = await Floor.findByIdAndUpdate(req.params.id, payload, {
       new: true,
       runValidators: true,
-    }).populate("floor", "name color isActive");
+    });
 
-    if (!table) {
-      return sendError(res, 404, "Table not found");
+    if (!floor) {
+      return sendError(res, 404, "Floor not found");
     }
 
-    emitTableUpdate(req, table, "table_updated");
+    const io = req.app.get("io") || req.io;
 
-    return sendSuccess(res, "Table updated successfully", {
-      table,
-      data: table,
+    if (io) {
+      io.emit("floor_updated", floor);
+    }
+
+    return sendSuccess(res, "Floor updated successfully", {
+      floor,
+      data: floor,
     });
   } catch (error) {
-    console.error("Patch table error:", error);
-    return sendError(res, 500, error.message || "Failed to update table");
+    console.error("Patch floor error:", error);
+    return sendError(res, 500, error.message || "Failed to update floor");
   }
 });
 
-// @route   PATCH /api/tables/:id/status
-// @desc    Update table status
+// @route   DELETE /api/floors/:id
+// @desc    Delete floor
 // @access  Admin only
-router.patch("/:id/status", protect, authorize(...ADMIN_ROLES), async (req, res) => {
+router.delete("/:id", protect, allowRoles(...ADMIN_ROLES), async (req, res) => {
   try {
-    const status = normalizeStatus(req.body.status);
+    const floor = await Floor.findById(req.params.id);
 
-    const table = await Table.findByIdAndUpdate(
-      req.params.id,
-      { status },
-      { new: true, runValidators: true }
-    ).populate("floor", "name color isActive");
-
-    if (!table) {
-      return sendError(res, 404, "Table not found");
+    if (!floor) {
+      return sendError(res, 404, "Floor not found");
     }
 
-    emitTableUpdate(req, table, "table_status_updated");
+    const tablesCount = await Table.countDocuments({ floor: req.params.id });
 
-    return sendSuccess(res, "Table status updated successfully", {
-      table,
-      data: table,
-    });
-  } catch (error) {
-    console.error("Update table status error:", error);
-    return sendError(res, 500, error.message || "Failed to update table status");
-  }
-});
-
-// @route   DELETE /api/tables/:id
-// @desc    Delete table
-// @access  Admin only
-router.delete("/:id", protect, authorize(...ADMIN_ROLES), async (req, res) => {
-  try {
-    const table = await Table.findById(req.params.id);
-
-    if (!table) {
-      return sendError(res, 404, "Table not found");
-    }
-
-    const activeOrder = await Order.findOne({
-      table: table._id,
-      status: { $in: ["draft", "sent_to_kitchen"] },
-    });
-
-    if (activeOrder) {
+    if (tablesCount > 0) {
       return sendError(
         res,
         400,
-        "Cannot delete table because it has an active order"
+        `Cannot delete floor: it has ${tablesCount} table(s) configured. Delete or move tables first.`
       );
     }
 
-    await table.deleteOne();
+    await Floor.deleteOne({ _id: req.params.id });
 
-    const io = req.app.get("io");
+    const io = req.app.get("io") || req.io;
+
     if (io) {
-      io.emit("table_deleted", { tableId: req.params.id });
-      io.emit("table_updated", { tableId: req.params.id, deleted: true });
+      io.emit("floor_deleted", { floorId: req.params.id });
+      io.emit("floor_updated", { floorId: req.params.id, deleted: true });
     }
 
-    return sendSuccess(res, "Table deleted successfully", {
+    return sendSuccess(res, "Floor deleted successfully", {
       deletedId: req.params.id,
     });
   } catch (error) {
-    console.error("Delete table error:", error);
-    return sendError(res, 500, error.message || "Failed to delete table");
+    console.error("Delete floor error:", error);
+    return sendError(res, 500, error.message || "Failed to delete floor");
   }
 });
 
